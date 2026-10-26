@@ -4,6 +4,8 @@ import { ImprovedNoise } from 'three/examples/jsm/math/ImprovedNoise.js';
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeSandTextures } from './sand.js';
 import { makeRockMaterial } from './rocks.js';
+import { createRover } from './rover.js';
+import { createMissionControl } from './mission/missionControl.js';
 
 // ---------- Utilidades ----------
 const noise = new ImprovedNoise();
@@ -41,9 +43,30 @@ function heightAt(x, z) {
   return base + dunes + small;
 }
 
+const TERRAIN_SIZE = 900;
+const TERRAIN_SEGMENTS = 400;
+const CELL = TERRAIN_SIZE / TERRAIN_SEGMENTS;
+
+// Altura exacta de la malla del terreno (interpolando sus triángulos), para que
+// el rover y las huellas queden apoyados justo sobre lo que se ve.
+function surfaceHeight(x, z) {
+  const gx = (x + TERRAIN_SIZE / 2) / CELL;
+  const gz = (z + TERRAIN_SIZE / 2) / CELL;
+  const ix = Math.floor(gx), iz = Math.floor(gz);
+  const fx = gx - ix, fz = gz - iz;
+  const x0 = ix * CELL - TERRAIN_SIZE / 2, z0 = iz * CELL - TERRAIN_SIZE / 2;
+  const ha = heightAt(x0, z0);
+  const hb = heightAt(x0, z0 + CELL);
+  const hd = heightAt(x0 + CELL, z0);
+  // PlaneGeometry divide cada celda por la diagonal b-d.
+  if (fx + fz <= 1) return ha + (hd - ha) * fx + (hb - ha) * fz;
+  const hc = heightAt(x0 + CELL, z0 + CELL);
+  return hc + (hb - hc) * (1 - fx) + (hd - hc) * (1 - fz);
+}
+
 // ---------- Renderer, escena y cámara ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
@@ -57,26 +80,40 @@ const zenithColor = new THREE.Color('#8a5a3c');
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(horizonColor, 0.0055);
 
+// El rover arranca mirando hacia el sol (-Z); la cámara va detrás de él.
+const ROVER_START = new THREE.Vector3(0, 0, 28);
+ROVER_START.y = surfaceHeight(ROVER_START.x, ROVER_START.z);
+const ROVER_HEADING = Math.PI;
+
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 4000);
-const camStart = new THREE.Vector3(0, 0, 40);
-camStart.y = heightAt(camStart.x, camStart.z) + 4;
+const camStart = new THREE.Vector3(0, 0, ROVER_START.z + 8);
+camStart.y = Math.max(surfaceHeight(camStart.x, camStart.z), ROVER_START.y) + 2.9;
+// La cámara mira por encima del rover, para ver también el horizonte y las lunas.
+const CAM_TARGET_HEIGHT = 2.2;
 camera.position.copy(camStart);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, camStart.y + 3, -40);
+controls.target.set(ROVER_START.x, ROVER_START.y + CAM_TARGET_HEIGHT, ROVER_START.z);
 controls.enableDamping = true;
-controls.maxPolarAngle = Math.PI * 0.52;
+controls.enablePan = false;
+controls.minDistance = 4;
+controls.maxDistance = 40;
+controls.maxPolarAngle = Math.PI * 0.49;
 controls.update();
 
 // ---------- Sol de tarde ----------
 const sunDir = new THREE.Vector3(-0.38, 0.14, -0.9).normalize();
 
 const sunLight = new THREE.DirectionalLight(0xffc58a, 3.2);
-sunLight.target.position.set(0, 0, -20);
-sunLight.position.copy(sunLight.target.position).addScaledVector(sunDir, 250);
+// La luz sigue al rover para que sus sombras siempre tengan buena resolución.
+function placeSun(center) {
+  sunLight.target.position.copy(center);
+  sunLight.position.copy(center).addScaledVector(sunDir, 250);
+}
+placeSun(new THREE.Vector3(0, 0, ROVER_START.z - 30));
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.set(2048, 2048);
-Object.assign(sunLight.shadow.camera, { left: -120, right: 120, top: 120, bottom: -120, near: 1, far: 600 });
+Object.assign(sunLight.shadow.camera, { left: -70, right: 70, top: 70, bottom: -70, near: 1, far: 600 });
 sunLight.shadow.bias = -0.0005;
 sunLight.shadow.normalBias = 0.05;
 sunLight.shadow.radius = 4;
@@ -127,8 +164,7 @@ sky.renderOrder = -1;
 scene.add(sky);
 
 // ---------- Terreno con dunas ----------
-const TERRAIN_SIZE = 900;
-const terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, 400, 400).rotateX(-Math.PI / 2);
+const terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS).rotateX(-Math.PI / 2);
 {
   const pos = terrainGeo.attributes.position;
   const colors = new Float32Array(pos.count * 3);
@@ -171,7 +207,7 @@ terrain.castShadow = true;
 scene.add(terrain);
 
 // ---------- Rocas ----------
-function makeRockGeometry(seed, roughness = 1, detail = 8) {
+function makeRockGeometry(seed, roughness = 1, detail = 5) {
   // Se fusionan los vértices para que las normales sean suaves (sin facetas).
   let geo = new THREE.IcosahedronGeometry(1, detail);
   geo.deleteAttribute('normal');
@@ -204,8 +240,10 @@ for (const geo of rockVariants) {
     // Más densidad cerca de la cámara, para que se lean bien.
     const r = 6 + Math.pow(rand(), 1.6) * 220;
     const a = -Math.PI / 2 + (rand() - 0.5) * Math.PI * 1.4;
-    const x = Math.cos(a) * r;
+    let x = Math.cos(a) * r;
     const z = camStart.z + Math.sin(a) * r;
+    // Dejamos libre el sitio donde aparece el rover.
+    if (Math.hypot(x - ROVER_START.x, z - ROVER_START.z) < 5) x += 9;
     // Las rocas cercanas son pequeñas; las grandes quedan a media distancia.
     const maxSize = THREE.MathUtils.clamp((r - 6) / 12, 0.15, 1) * 2.6;
     const s = 0.15 + Math.pow(rand(), 3) * maxSize;
@@ -241,8 +279,8 @@ function makeMoon(radius, dir, seed, stretch) {
   scene.add(moon);
   return moon;
 }
-const phobos = makeMoon(34, new THREE.Vector3(0.45, 0.32, -0.82), 3.1, 1.3);
-const deimos = makeMoon(14, new THREE.Vector3(0.08, 0.4, -0.9), 11.7, 1.1);
+const phobos = makeMoon(34, new THREE.Vector3(0.45, 0.22, -0.86), 3.1, 1.3);
+const deimos = makeMoon(14, new THREE.Vector3(0.1, 0.27, -0.95), 11.7, 1.1);
 
 // ---------- Polvo en suspensión ----------
 function dustSprite() {
@@ -279,6 +317,65 @@ const dust = new THREE.Points(
 );
 scene.add(dust);
 
+// ---------- Control de misión (tecla T) ----------
+createMissionControl();
+
+// ---------- Rover Perseverance ----------
+let rover = null;
+createRover({ scene, surfaceHeight, start: ROVER_START, heading: ROVER_HEADING })
+  .then(async (r) => {
+    // Compilamos los shaders antes de mostrarlo, para evitar tirones.
+    await renderer.compileAsync(scene, camera);
+    rover = r;
+    window.__ready = true;
+    window.__debug = { renderer, scene, rover: r, camera, controls };
+  })
+  .catch((err) => console.error('No se pudo cargar el rover:', err));
+
+// Teclado: WASD o flechas. Se usa e.code para que funcione con cualquier distribución.
+const keys = new Set();
+addEventListener('keydown', (e) => keys.add(e.code));
+addEventListener('keyup', (e) => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+const input = { forward: 0, backward: 0, left: 0, right: 0 };
+function readInput() {
+  input.forward = keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0;
+  input.backward = keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0;
+  input.left = keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0;
+  input.right = keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0;
+  return input;
+}
+
+// Cámara que sigue al rover: se desplaza con él y, al conducir, se coloca
+// poco a poco detrás. El ratón sigue sirviendo para orbitar y hacer zoom.
+const prevRoverPos = new THREE.Vector3();
+const camOffset = new THREE.Vector3();
+function followRover(dt) {
+  const pos = rover.object.position;
+  camera.position.add(prevRoverPos.subVectors(pos, prevRoverPos));
+  controls.target.set(pos.x, pos.y + CAM_TARGET_HEIGHT, pos.z);
+
+  if (Math.abs(rover.state.speed) > 0.2) {
+    camOffset.subVectors(camera.position, controls.target);
+    const radius = Math.hypot(camOffset.x, camOffset.z);
+    const current = Math.atan2(camOffset.x, camOffset.z);
+    const behind = rover.state.heading + Math.PI;
+    const diff = Math.atan2(Math.sin(behind - current), Math.cos(behind - current));
+    const angle = current + diff * (1 - Math.exp(-dt * 1.5));
+    camera.position.set(
+      controls.target.x + Math.sin(angle) * radius,
+      camera.position.y,
+      controls.target.z + Math.cos(angle) * radius
+    );
+  }
+  // Nunca por debajo del suelo.
+  const ground = surfaceHeight(camera.position.x, camera.position.z) + 0.8;
+  if (camera.position.y < ground) camera.position.y = ground;
+
+  prevRoverPos.copy(pos);
+  placeSun(pos);
+}
+
 // ---------- Animación ----------
 const clock = new THREE.Clock();
 const wind = new THREE.Vector3(1.2, 0.05, 0.6);
@@ -286,6 +383,12 @@ const wind = new THREE.Vector3(1.2, 0.05, 0.6);
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
   const t = clock.elapsedTime;
+
+  if (rover) {
+    if (prevRoverPos.lengthSq() === 0) prevRoverPos.copy(rover.object.position);
+    rover.update(dt, readInput());
+    followRover(dt);
+  }
 
   const p = dustGeo.attributes.position;
   for (let i = 0; i < DUST_COUNT; i++) {

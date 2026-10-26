@@ -8,9 +8,17 @@
     <style>
       html, body { margin: 0; height: 100%; overflow: hidden; background: #c98a55; }
       canvas { display: block; }
+      #hud {
+        position: fixed; left: 16px; bottom: 16px;
+        padding: 8px 12px; border-radius: 6px;
+        font: 13px/1.4 system-ui, sans-serif; color: #fbe9d7;
+        background: rgba(40, 18, 8, 0.45); pointer-events: none;
+      }
+      #hud b { color: #fff; }
     </style>
   </head>
   <body>
+    <div id="hud"><b>WASD</b> / flechas: conducir · <b>ratón</b>: orbitar y zoom · <b>T</b>: control de misión</div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
